@@ -2,7 +2,7 @@
 
 Este projeto extrai dados de precipitação para municípios brasileiros usando a API da NASA POWER e calcula o Índice de Precipitação Padronizado (SPI) em escala trimestral.
 
-- 🔄 Etapas principais
+🔄 Etapas principais
 - 📍 Uso de shapefile do IBGE e cálculo de centróides
 - 🌎 Coleta de dados mensais de precipitação (2000–2025)
 - 🔗 Integração espacial dos dados
