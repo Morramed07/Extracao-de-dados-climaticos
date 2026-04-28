@@ -3,6 +3,7 @@
 Este projeto extrai dados de precipitação para municípios brasileiros usando a API da NASA POWER e calcula o Índice de Precipitação Padronizado (SPI) em escala trimestral.
 
 🔄 Etapas principais
+
 - 📍 Uso de shapefile do IBGE e cálculo de centróides
 - 🌎 Coleta de dados mensais de precipitação (2000–2025)
 - 🔗 Integração espacial dos dados
@@ -11,7 +12,8 @@ Este projeto extrai dados de precipitação para municípios brasileiros usando 
 
 
 🎯 Objetivo
-Monitorar padrões de seca e umidade no Brasil ao longo do tempo, permitindo análises climáticas comparáveis entre regiões e períodos.
+
+- Monitorar padrões de seca e umidade no Brasil ao longo do tempo, permitindo análises climáticas comparáveis entre regiões e períodos.
 
 🌐 Sobre a API NASA POWER
 
