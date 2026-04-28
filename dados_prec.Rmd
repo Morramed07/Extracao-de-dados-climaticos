@@ -1,0 +1,572 @@
+---
+title: "Extração de dados climáticos"
+output:
+  pdf_document: default
+  html_document: default
+date: "2026-04-26"
+---
+
+# Extração dos dados climáticos
+
+#### Importando pacotes necessários
+
+```{r}
+require(readr)
+require(nasapower) #API PARA CARREGAMENTO DE DADOS CLIMÁTICOS DA NASA
+require(sf) 
+require(dplyr)
+require(ggplot2)
+require(tidyr)
+require(SPEI)
+require(writexl)
+require(tmap)
+```
+
+#### Carregando shape dos municipios do brasil e calculando os centroides de cada municipio para uso na função de extração dos dados.
+
+```{r}
+
+#carregando arquivo shp 
+
+shape <- sf::st_read("C:/Users/Morramed/Downloads/dados climáticos/BR_Municipios_2025/BR_Municipios_2025.shp") 
+
+# o arquivo shapefile pode ser encontrado no site do IBGE: https://www.ibge.gov.br/geociencias/organizacao-do-territorio/malhas-territoriais.html
+
+# calculando os centroides de cada município
+centroides <- sf::st_point_on_surface(shape) # função no qual calcula o centróide exclusivamente dentro do poligono
+
+# transformando o dados em objeto espacial no sistema de coordenadas LON, LAT
+centroides <- sf::st_transform(centroides,4326) 
+
+
+# extração das coordenadas do poInt oara duas colunas, X e Y
+coords <- st_coordinates(centroides)
+
+# criando as colunas LON e LAT no objeto centroide
+centroides$LON <- coords[,1]
+centroides$LAT <- coords[,2]
+
+head(centroides)
+
+
+```
+
+#### Extração dos dados climáticos via api NASA POWER
+
+```{r}
+df_prec <- lapply(seq_len(nrow(centroides)), function(i){  # Função de extração dos dados por municipio
+  
+  cat("Baixando município", i, "de", nrow(centroides), "\n")
+  
+  nasapower::get_power(
+    community = "ag",
+    lonlat = c(
+      centroides$LON[i],
+      centroides$LAT[i]
+    ),
+    pars = "PRECTOTCORR_SUM",
+    dates = c("2000-01-01","2025-12-31"),
+    temporal_api = "monthly" 
+  ) |>
+    mutate( 
+      municipio_id = centroides$municipio_id[i] 
+    )
+  
+})
+
+prec_bra <- dplyr::bind_rows(df_prec) #unir os dados em um único df
+
+prec_bra$LON <- as.numeric(prec_bra$LON) #garantindo número puro
+prec_bra$LAT <- as.numeric(prec_bra$LAT)
+
+prec_bra <- sf::st_as_sf(  #converte o df para objeto espacial
+  prec_bra, 
+  coords = c("LON", "LAT"), 
+  crs = 4326, 
+  remove = FALSE
+)
+
+centroides <- centroides |>  #seleciona apenas as colunas que queremos para junção dos dados de chuva com o shape
+  dplyr::select(NM_MUN,NM_UF, NM_REGIAO, LON, LAT)
+
+df_final <- st_join(prec_bra, centroides) # juntando os dados de precipitação com o nosso shape
+
+df_final <- df_findf_final <- df_final |> #excluindo colunas selecionadas
+  dplyr::select(-LON.y, -LAT.y)
+
+
+head(df_final)
+
+```
+
+#### Ajustando DF para análises futuras
+
+```{r}
+df_long <- df_final |>  # tranformando o df em formato longo, onde cria uma colunas para os meses e para sua precipitação
+  tidyr::pivot_longer(
+    cols = JAN:DEC,
+    names_to = "MONTH",
+    values_to = "PREC"
+  )
+
+
+df_long <- df_long |> #selecinando apenas as colunas necessárias
+  dplyr::select(NM_MUN, NM_UF,NM_REGIAO, geometry, LON.x, LAT.x, YEAR, MONTH, PREC)
+
+
+df_long <- df_long |> #alterando a nomenclatura de meses para número do mês
+  mutate(
+    MONTH = match(tolower(MONTH), tolower(month.abb))
+  )
+
+head(df_long)
+```
+
+#### Criando os trimestres e calculando o Índice de Precipitação Padronizado (SPI) de cada trimestre
+
+```{r}
+df_long <- df_long |> # criando trimestres
+  mutate(
+    trimestre = case_when(
+      MONTH %in% 1:3 ~ "T1",
+      MONTH %in% 4:6 ~ "T2",
+      MONTH %in% 7:9 ~ "T3",
+      TRUE ~ "T4"
+    )
+  )
+
+df_spi <- df_long |> # somando a preciptação de cada trimestre
+  group_by(NM_MUN,NM_UF, NM_REGIAO, geometry, LON.x, LAT.x, YEAR, trimestre) |> 
+  summarise( PREC = sum(PREC, na.rm = TRUE), .groups = "drop" )
+
+
+df_spi <- df_spi |> #calculando o spi
+  group_by(NM_MUN, NM_UF) |>
+  mutate(
+    spi = as.numeric(spi(PREC, scale = 1)$fitted)
+  ) |>
+  ungroup()
+
+
+df_spi <- df_spi |> # criando a classe do spi com base nos valores
+  mutate(
+    classe_spi = case_when(
+      spi >= 2            ~ "Extremamente úmido",
+      spi >= 1.5          ~ "Severamente úmido",
+      spi >= 1            ~ "Moderadamente úmido",
+      spi >= 0.1          ~ "Umidade incipiente",
+      spi >= 0            ~ "Seca incipiente",
+      spi >= -1           ~ "Moderadamente seco",
+      spi >= -1.5         ~ "Severamente seco",
+      TRUE                ~ "Extremamente seco"
+    )
+  )
+```
+
+#### Criando excel para uso em ánalises, evvio para outras pessoas, etc.
+
+```{r}
+df_filtrado <- df_spi |> #filtrando os dados a parti de 2020
+  filter(YEAR >= 2020)
+
+any(is.na(df_filtrado)) #verificação de valores nulos
+
+write_xlsx(df_filtrado, "dados_climaticos2.xlsx") # criação do excel
+
+```
+
+#### Junção dos dados para criar um df completo
+
+```{r}
+
+df_filtrado <- sf::st_drop_geometry(df_filtrado) #removendo a geometria espacial para o join
+
+Dados <- shape |> left_join(df_filtrado, by = c( #juntando os shape com o dados filtrados para pegar o geometria completa do município
+  "NM_MUN" = "NM_MUN",
+  "NM_UF"  = "NM_UF"
+))
+
+Dados <- Dados |> select(NM_MUN,NM_UF, NM_REGIAO.x, LON.x, LAT.x, geometry, 
+                         YEAR, trimestre, PREC, spi, classe_spi
+) #selecionando coluna 
+
+```
+
+#### Plot de pontos no mapa
+
+```{r}
+#plot de pontos no shape
+
+ggplot() +
+  geom_sf(data = shape,  aes(fill = NM_UF))+
+  geom_point(data = Dados, aes(x = LON.x, y= LAT.x), size = 1)
+
+```
+
+# Explorando os dados de precipitação dos municipios do Brasil
+
+```{r}
+
+
+#### Criando funções para apoio nas análises
+
+# função para criar trimestre
+
+quebra_trimestre <- function(df){
+  split(df, df$trimestre)
+}
+
+
+# função para criação de mapas com ggplot
+
+mapa_spi <- function(dados, titulo){
+  
+  ggplot(dados) +
+    geom_sf(aes(fill = spi), color = "gray80", linewidth = 0.2) +
+    scale_fill_distiller(
+      palette = "RdBu",
+      breaks = c(-2, -1.5, -1, 0, 1, 1.5, 2),
+      limits = c(-2, 2),
+      oob = scales::squish,
+      direction = -1
+    ) +
+    labs(
+      title = titulo,
+      fill = "SPI"
+    ) +
+    theme_minimal()
+}
+```
+
+```{r}
+
+#### mapas do spi trimestrais de 2025
+
+# filtrando os dados para os trimestres de 2025
+
+D2025 <- Dados |> dplyr::filter(
+  YEAR == "2025"
+)
+
+tri_2025 <- quebra_trimestre(D2025)
+
+#primeiro trimestre
+
+p1 <- mapa_spi(tri_2025$T1, "SPI - 1º Trimestre de 2025")
+
+p1
+```
+
+```{r}
+#segundo trimestre
+
+p2 <- mapa_spi(tri_2025$T2, "SPI - 2º Trimestre de 2025")
+
+p2
+
+```
+
+```{r}
+#terceiro trimestre
+
+p3 <- mapa_spi(tri_2025$T3    ,  "SPI - 3º Trimestre de 2025")
+
+p3
+```
+
+```{r}
+#quarto trimestre
+
+p4 <- mapa_spi(tri_2025$T4   ,  "SPI - 4º Trimestre de 2025")
+
+p4
+```
+
+```{r}
+
+
+#### Comparação dos trimestres de 2025
+
+plot1 <- (p1 | p2)/
+         (p3 | p4)
+
+
+plot1
+```
+
+```{r}
+
+#### mapas do spi trimestrais de 2024
+
+# filtrando os dados para os trimestres de 2024
+
+D2024 <- Dados |> dplyr::filter(
+  YEAR == "2024"
+)
+
+tri_2024 <- quebra_trimestre(D2024)
+
+#primeiro trimestre
+
+p5 <- mapa_spi(tri_2024$T1, "SPI - 1º Trimestre de 2024")
+
+p5
+```
+
+```{r}
+#segundo trimestre
+
+p6 <- mapa_spi(tri_2024$T2, "SPI - 2º Trimestre de 2024")
+
+p6
+```
+
+```{r}
+#terceiro trimestre
+
+p7 <- mapa_spi(tri_2024$T3, "SPI - 3º Trimestre de 2024")
+
+p7
+```
+
+```{r}
+#quarto trimestre
+
+p8 <- mapa_spi(tri_2024$T4, "SPI - 4º Trimestre de 2024")
+
+p8
+```
+
+```{r}
+
+#### Comparação dos trimestres de 2024
+
+plot2 <- (p5 | p6)/
+  (p7| p8)
+
+
+plot2
+```
+
+```{r}
+#### mapas do spi trimestrais de 2023
+
+# mapas do spi trimestrais de 2023------------------
+
+# filtrando os dados para os trimestres de 2023
+
+D2023 <- Dados |> dplyr::filter(
+  YEAR == "2023"
+)
+
+tri_2023 <- quebra_trimestre(D2023)
+
+#primeiro trimestre
+
+p9 <- mapa_spi(tri_2023$T1, "SPI - 1º Trimestre de 2023")
+
+p9
+```
+
+```{r}
+#segundo trimestre
+
+p10 <- mapa_spi(tri_2023$T2, "SPI - 2º Trimestre de 2023")
+
+p10
+
+```
+
+```{r}
+#terceiro trimestre
+
+p11 <- mapa_spi(tri_2023$T3, "SPI - 3º Trimestre de 2023")
+
+p11
+```
+
+```{r}
+#quarto trimestre
+
+p12 <- mapa_spi(tri_2023$T4, "SPI - 4º Trimestre de 2023")
+
+p12
+
+```
+
+```{r}
+
+#### Comparação dos trimestres de 2023
+
+
+plot3 <- (p9 | p10)/
+  (p11| p12)
+
+
+plot3
+```
+
+```{r}
+
+#### mapas do spi trimestrais de 2022
+
+# filtrando os dados para os trimestres de 2022
+
+D2022 <- Dados |> dplyr::filter(
+  YEAR == "2022"
+)
+
+tri_2022 <- quebra_trimestre(D2022)
+
+#primeiro trimestre
+
+p13 <- mapa_spi(tri_2022$T1, "SPI - 1º Trimestre de 2022")
+
+p13
+```
+
+```{r}
+#segundo trimestre
+
+p14 <- mapa_spi(tri_2022$T2, "SPI - 2º Trimestre de 2022")
+
+p14
+
+```
+
+```{r}
+#terceiro trimestre
+
+p15 <- mapa_spi(tri_2022$T3, "SPI - 3º Trimestre de 2022")
+
+p15
+```
+
+```{r}
+#quarto trimestre
+
+p16 <- mapa_spi(tri_2022$T4, "SPI - 4º Trimestre de 2022")
+
+p16
+
+```
+
+```{r}
+
+#### Comparação dos trimestres de 2022
+
+plot4 <- (p13 | p14)/
+  (p15| p16)
+
+
+plot4
+
+```
+
+```{r}
+
+#### mapas do spi trimestrais de 2021
+
+# filtrando os dados para os trimestres de 2021
+
+D2021 <- Dados |> dplyr::filter(
+  YEAR == "2021"
+)
+tri_2021 <- quebra_trimestre(D2021)
+
+#primeiro trimestre
+
+p17 <- mapa_spi(tri_2021$T1, "SPI - 1º Trimestre de 2021")
+
+p17
+```
+
+```{r}
+#segundo trimestre
+
+p18 <- mapa_spi(tri_2021$T2, "SPI - 2º Trimestre de 2021")
+
+p18
+```
+
+```{r}
+#terceiro trimestre
+
+p19 <- mapa_spi(tri_2021$T3, "SPI - 3º Trimestre de 2021")
+
+p19
+```
+
+```{r}
+#quarto trimestre
+
+p20 <- mapa_spi(tri_2021$T4, "SPI - 4º Trimestre de 2021")
+
+p20
+```
+
+```{r}
+#### comparação dos trimestres de 2021
+
+plot5 <- (p17 | p18)/
+  (p19| p20)
+
+
+plot5
+```
+
+```{r}
+#### mapas do spi trimestrais de 2020
+
+# filtrando os dados para os trimestres de 2021
+
+D2020 <- Dados |> dplyr::filter(
+  YEAR == "2020"
+)
+tri_2020 <- quebra_trimestre(D2020)
+
+#primeiro trimestre
+
+p21 <- mapa_spi(tri_2020$T1, "SPI - 1º Trimestre de 2020")
+
+p21
+```
+
+```{r}
+#segundo trimestre
+
+p22 <- mapa_spi(tri_2020$T2, "SPI - 2º Trimestre de 2020")
+
+p22
+```
+
+```{r}
+#terceiro trimestre
+
+p23 <- mapa_spi(tri_2020$T3, "SPI - 3º Trimestre de 2020")
+
+p23
+```
+
+```{r}
+#quarto trimestre
+
+p24 <- mapa_spi(tri_2020$T4, "SPI - 4º Trimestre de 2020")
+
+p24
+```
+
+```{r}
+
+#### comparação dos trimestres de 2020
+
+plot6 <- (p21 | p22)/
+  (p23| p24)
+
+
+plot6
+```
+
+#### A função da API NASA POWER é trazer os dados climáticos, não apenas de precipitação, mas umidade relativa, irradiação, velocidade do vento, entre outros 350 parâmetros de interesse. Você pode conferir quais são os paramêtros e seus períodos de extração no link: <https://power.larc.nasa.gov/parameters/>
+
+#### 
